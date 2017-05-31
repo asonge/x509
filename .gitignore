@@ -1,0 +1,5 @@
+/certs/*.pem
+/certs/signme.txt.*
+/x509
+*.dSYM
+/.vscode
