@@ -192,8 +192,8 @@ void print_help(const char *cmd) {
   printf("Usage:\n");
   printf("\t%s sign keyfile filetosign\n", cmd);
   // printf("\t%s verify selfsigned_cert signedfile\n", cmd);
-  printf("\t%s verify cafile certfile signaturefile\n", cmd);
-  printf("\t%s verify cafile certfile chainfile signaturefile\n", cmd);
+  printf("\t%s verify cafile certfile signaturefile filetosign\n", cmd);
+  printf("\t%s verify cafile certfile chainfile signaturefile filetosign\n", cmd);
 }
 
 void print_error(X509_STORE_CTX *ctx) {
