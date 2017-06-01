@@ -1,0 +1,4 @@
+[ usr_cert ]
+basicConstraints = CA:false
+[ v3_ca ]
+basicConstraints = CA:true

@@ -1,5 +1,6 @@
 #include "stdio.h"
 #include "string.h"
+#include "openssl/err.h"
 #include "openssl/pem.h"
 #include "openssl/x509_vfy.h"
 
@@ -8,7 +9,7 @@ const int BUF_SIZE = 4096;
 
 int sign(const char *pk_file, const char *file);
 
-int verify(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file);
+int verify(const char *ca_file, const char *chain_file, const char *cert_file, const char *sign_file, const char *file);
 int verify_cert(const char *ca_file, const char *chain_file, X509 *cert);
 int verify_signature(X509 *cert, const char *sign_file, const char *file);
 
@@ -17,9 +18,9 @@ void print_error(X509_STORE_CTX *ctx);
 
 X509 * read_pem_file(const char *filename);
 BIO * bio_base64_file(const char *filename);
-int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs);
+STACK_OF(X509) * read_pem_file_multi(const char *filename);
 BIO * fopen_bio(const char *filename);
-EVP_MD_CTX *md_sign_or_verify_file(const char *filename, EVP_PKEY *pkey, const EVP_MD *md);
+EVP_MD_CTX *md_sign_or_verify_file(const char *filename, const EVP_MD *md);
 
 int main(int argc, char *argv[]) {
   if(argc < 2) {
@@ -31,7 +32,7 @@ int main(int argc, char *argv[]) {
   if(strcmp(argv[1],"sign")==0 && argc==4) {
     return sign(argv[2], argv[3])==OK ? 0 : 1;
   } else if(strcmp(argv[1],"verify")==0 && argc==6) {
-    return verify(argv[2], argv[3], NULL, argv[4], argv[5])==OK ? 0 : 1;
+    return verify(argv[2], NULL, argv[3], argv[4], argv[5])==OK ? 0 : 1;
   } else if(strcmp(argv[1],"verify")==0 && argc==7) {
     return verify(argv[2], argv[3], argv[4], argv[5], argv[6])==OK ? 0 : 1;
   } else {
@@ -56,7 +57,7 @@ int sign(const char *pk_file, const char *sign_file) {
   void *signature = malloc(EVP_PKEY_size(pkey));
   unsigned int sig_size;
 
-  ctx = md_sign_or_verify_file(sign_file, pkey, EVP_sha256());
+  ctx = md_sign_or_verify_file(sign_file, EVP_sha256());
   ret = EVP_SignFinal(ctx, signature, &sig_size, pkey);
   if(ret==1) {
     bio = bio_base64_file("-");
@@ -69,7 +70,7 @@ int sign(const char *pk_file, const char *sign_file) {
   return ret==1 ? OK : !OK;
 }
 
-int verify(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file) {
+int verify(const char *ca_file, const char *chain_file, const char *cert_file, const char *sign_file, const char *file) {
   // The certificate we want to validate
   X509 *cert = NULL;
   cert = read_pem_file(cert_file);
@@ -100,13 +101,16 @@ int verify_signature(X509 *cert, const char *sign_file, const char *file) {
     ret = 0;
     goto cleanup;
   }
-  // TODO exit/warn if we've read 0 bytes, possibly not in base64 then.
   
   // Done reading in signature data.
-  ctx = md_sign_or_verify_file(file, pkey, EVP_sha256());
+  ctx = md_sign_or_verify_file(file, EVP_sha256());
   ret = EVP_VerifyFinal(ctx, signature, sig_size, pkey);
   
 cleanup:
+  if(ret!=1) {
+    printf("Error: %ld\n", ERR_get_error());
+  }
+  free(signature);
   if(bio!=NULL) BIO_free_all(bio);
   if(ctx!=NULL) EVP_MD_CTX_destroy(ctx);
   return ret==1 ? OK : !OK;
@@ -125,6 +129,10 @@ int verify_cert(const char *ca_file, const char *chain_file, X509 *cert) {
   if(ret!=1) {
     printf("Could not read file %s for reason: %d\n", ca_file, ret);
     goto cleanup;
+  }
+
+  if(chain_file!=NULL) {
+    chain = read_pem_file_multi(chain_file);
   }
 
   ret = X509_STORE_CTX_init(ctx, store, cert, chain);
@@ -195,7 +203,7 @@ BIO * bio_base64_file(const char *filename) {
 }
 // EVP_VerifyInit and EVP_SignInit, EVP_VerifyUpdate and EVP_SignUpdate are all actually
 // EVP_DigestInit and EVP_DigestUpdate, so we can collect some repeated code here.
-EVP_MD_CTX *md_sign_or_verify_file(const char *filename, EVP_PKEY *pkey, const EVP_MD *md) {
+EVP_MD_CTX *md_sign_or_verify_file(const char *filename, const EVP_MD *md) {
   BIO *bio = fopen_bio(filename);
   int bytes_read = 0;
   unsigned char buf[BUF_SIZE];
@@ -220,10 +228,11 @@ X509 * read_pem_file(const char *filename) {
   return x;
 }
 
-int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs) {
+STACK_OF(X509) * read_pem_file_multi(const char *filename) {
+  int ret = 1;
   int i;
-  int ret = 0;
-  
+
+  STACK_OF(X509) *certs = sk_X509_new_null();  
   STACK_OF(X509_INFO) *infos = NULL;
   X509_INFO *info = NULL;
   
@@ -234,13 +243,14 @@ int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs) {
   for(i=0; i < sk_X509_INFO_num(infos); i++) {
     info = sk_X509_INFO_value(infos, i);
     if(info->x509==NULL) continue;
-    if(!sk_X509_push(*certs, info->x509)) {
-      ret = -1;
+    if(!sk_X509_push(certs, info->x509)) {
+      ret = 0;
       goto cleanup;
     }
-    ret++;
+    // I guess to prevent us from re-freeing? Hack borrowed from OpenSSL CLI source. Ugh. Blech.
+    info->x509 = NULL;
   }
 cleanup:
   sk_X509_INFO_pop_free(infos, X509_INFO_free);
-  return ret;
+  return ret ? certs : NULL;
 }
