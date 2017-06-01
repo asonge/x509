@@ -141,14 +141,10 @@ cleanup:
 
 int verify_cert(const char *ca_file, const char *chain_file, X509 *cert) {
   int ret;
-  // The trusted store
-  X509_STORE *store;
-  // The lookup method for the trusted store
-  X509_LOOKUP *lookup;
-  // The context for verifying a certificate
-  X509_STORE_CTX *ctx;
-  // A stack of intermediate certificates to validate
-  STACK_OF(X509) *chain = NULL;
+  X509_STORE *store;             // The trusted store
+  X509_LOOKUP *lookup;           // The lookup method for the trusted store
+  X509_STORE_CTX *ctx;           // The context for verifying a certificate
+  STACK_OF(X509) *chain = NULL;  // A stack of intermediate certificates to validate
 
   store = X509_STORE_new();
   lookup = X509_STORE_add_lookup(store,X509_LOOKUP_file());
