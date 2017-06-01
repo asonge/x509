@@ -15,6 +15,7 @@ void print_help(const char *cmd);
 void print_error(X509_STORE_CTX *ctx);
 int sign_file(const char *pk_file, const char *file);
 int verify_cert(const char *ca_file, const char *chain_file, X509 *cert);
+int verify_signature(X509 *cert, const char *sign_file, const char *file);
 int verify_cert_and_signature(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file);
 
 int main(int argc, char *argv[]) {
@@ -25,7 +26,7 @@ int main(int argc, char *argv[]) {
   // If the following line is missing, nothing works and you will not know why.
   OpenSSL_add_all_algorithms();
   if(strcmp(argv[1],"sign")==0 && argc==4) {
-    return sign_file(argv[2], argv[3]);
+    return sign_file(argv[2], argv[3])==OK ? 0 : 1;
   } else if(strcmp(argv[1],"verify")==0 && argc==6) {
     return verify_cert_and_signature(argv[2], argv[3], NULL, argv[4], argv[5])==OK ? 0 : 1;
   } else if(strcmp(argv[1],"verify")==0 && argc==7) {
@@ -38,49 +39,63 @@ int main(int argc, char *argv[]) {
 
 const int BUF_SIZE = 4096;
 
-int sign_file(const char *pk_file, const char *sign_file) {
+BIO *fopen_bio(const char *filename) {
+  if(strcmp(filename,"-")==0) {
+    return BIO_new_fp(stdout, BIO_NOCLOSE);
+  } else {
+    return BIO_new_file(filename, "rb");
+  }
+}
+BIO *bio_base64_file(const char *filename) {
+  BIO *bio, *b64;
+  bio = fopen_bio(filename);
+  b64 = BIO_new(BIO_f_base64());
+  return BIO_push(b64, bio);
+}
+// EVP_VerifyInit and EVP_SignInit, EVP_VerifyUpdate and EVP_SignUpdate are all actually
+// EVP_DigestInit and EVP_DigestUpdate, so we can collect some repeated code here.
+EVP_MD_CTX *md_sign_or_verify_file(const char *filename, EVP_PKEY *pkey, const EVP_MD *md) {
+  BIO *bio = fopen_bio(filename);
+  int bytes_read = 0;
   unsigned char buf[BUF_SIZE];
-  size_t bytes_read;
-  const EVP_MD *md = EVP_sha256();
 
   EVP_MD_CTX *ctx = EVP_MD_CTX_create();
-  FILE *fp = fopen(pk_file, "r");
-  if(!fp) {
-    printf("Could not read file %s\n", pk_file);
-    return !OK;
+  EVP_DigestInit(ctx, md);
+  while((bytes_read=BIO_read(bio, buf, BUF_SIZE))>0) {
+    EVP_DigestUpdate(ctx, buf, bytes_read);
   }
-  EVP_PKEY *pkey = PEM_read_PrivateKey(fp, NULL, NULL, NULL);
-  fclose(fp);
-  
-  unsigned int key_size = EVP_PKEY_size(pkey);
-  unsigned char signature[key_size];
-  unsigned int sig_size;
-
-  fp = fopen(sign_file, "rb");
-  if(!fp) {
-    printf("Could not read file %s\n", sign_file);
-    return !OK;
-  }
-  EVP_SignInit(ctx, md);
-  while((bytes_read = fread(buf, 1, BUF_SIZE, fp)) > 0) {
-    EVP_SignUpdate(ctx, buf, bytes_read);
-  }
-  fclose(fp);
-  EVP_SignFinal(ctx, signature, &sig_size, pkey);
-
-  BIO *bio, *b64;
-  b64 = BIO_new(BIO_f_base64());
-  bio = BIO_new_fp(stdout, BIO_NOCLOSE);
-  bio = BIO_push(b64, bio);
-
-  BIO_write(bio, signature, sig_size);
-  BIO_flush(bio);
   BIO_free_all(bio);
-  
-  return OK;
+  return ctx;
 }
 
-int verify_signature(X509 *cert, const char *sign_file, const char *file);
+int sign_file(const char *pk_file, const char *sign_file) {
+  int ret;
+  EVP_MD_CTX *ctx = NULL;
+  
+  BIO *bio = fopen_bio(pk_file);
+  // TODO: implement pw prompt:
+  // https://www.openssl.org/docs/man1.0.2/crypto/PEM_read_bio_PrivateKey.html
+  EVP_PKEY *pkey = PEM_read_bio_PrivateKey(bio, NULL, NULL, NULL);
+  BIO_free_all(bio);
+  if(pkey==NULL) {
+    return !OK;
+  }
+  
+  void *signature = malloc(EVP_PKEY_size(pkey));
+  unsigned int sig_size;
+
+  ctx = md_sign_or_verify_file(sign_file, pkey, EVP_sha256());
+  ret = EVP_SignFinal(ctx, signature, &sig_size, pkey);
+  if(ret==1) {
+    bio = bio_base64_file("-");
+    BIO_write(bio, signature, sig_size);
+    BIO_flush(bio);
+    BIO_free_all(bio);
+  }
+  free(signature);
+  EVP_MD_CTX_destroy(ctx);
+  return ret==1 ? OK : !OK;
+}
 
 int verify_cert_and_signature(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file) {
   // The certificate we want to validate
@@ -96,45 +111,33 @@ int verify_cert_and_signature(const char *ca_file, const char *cert_file, const 
 
 int verify_signature(X509 *cert, const char *sign_file, const char *file) {
   int ret;
-  FILE *fp;
-  unsigned char buf[BUF_SIZE];
-  size_t bytes_read;
-  const EVP_MD *md = EVP_sha256();
-  EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+  BIO *bio = NULL;
+  EVP_MD_CTX *ctx = NULL;
 
   // Let's read in the signature data
   EVP_PKEY *pkey = X509_get_pubkey(cert);
-  BIO *bio = BIO_new_file(sign_file, "rb");
-  BIO *b64 = BIO_new(BIO_f_base64());
-  bio = BIO_push(b64, bio);
-  
-  unsigned int key_size = EVP_PKEY_size(pkey);
-  unsigned char signature[key_size];
-  unsigned int sig_size=0, read_bytes;
 
+  bio = bio_base64_file(sign_file);
+  unsigned char *signature = malloc(EVP_PKEY_size(pkey));
+  unsigned int sig_size=0, read_bytes;
   while((read_bytes=BIO_read(bio, &signature[sig_size], BUF_SIZE)) > 0) {
-    printf("Read %d of possible %d\n", read_bytes, key_size);
     sig_size += read_bytes;
   }
+  if(sig_size==0) {
+    printf("Could not read data from signature file %s, maybe not valid base64?\n", sign_file);
+    ret = 0;
+    goto cleanup;
+  }
+  // TODO exit/warn if we've read 0 bytes, possibly not in base64 then.
   
-  printf("Read in %d of signature file\n", sig_size);
-  BIO_free_all(bio);
   // Done reading in signature data.
-
-  // Let's read in the file we want to sign
-  fp = fopen(file, "rb");
-  if(!fp) {
-    printf("Could not read file %s\n", sign_file);
-    return !OK;
-  }
-  EVP_VerifyInit(ctx, md);
-  while((bytes_read = fread(buf, 1, BUF_SIZE, fp)) > 0) {
-    EVP_VerifyUpdate(ctx, buf, bytes_read);
-  }
+  ctx = md_sign_or_verify_file(file, pkey, EVP_sha256());
   ret = EVP_VerifyFinal(ctx, signature, sig_size, pkey);
-  fclose(fp);
-  EVP_MD_CTX_destroy(ctx);
-  return ret;
+  
+cleanup:
+  if(bio!=NULL) BIO_free_all(bio);
+  if(ctx!=NULL) EVP_MD_CTX_destroy(ctx);
+  return ret==1 ? OK : !OK;
 }
 
 int verify_cert(const char *ca_file, const char *chain_file, X509 *cert) {
@@ -210,12 +213,13 @@ void print_error(X509_STORE_CTX *ctx) {
 }
 
 X509 * read_pem_file(const char *filename) {
-  FILE *fp = fopen(filename, "r");
-  if(fp==NULL) {
-    printf("Cound not read file %s\n", filename);
-    return NULL;
+  BIO *bio = fopen_bio(filename);
+  X509 *x = PEM_read_bio_X509(bio, NULL, NULL, NULL);
+  BIO_free_all(bio);
+  if(!x) {
+    printf("Could not read certificate from %s\n", filename);
   }
-  return PEM_read_X509(fp, NULL, NULL, NULL);
+  return x;
 }
 
 int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs) {
@@ -225,14 +229,9 @@ int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs) {
   STACK_OF(X509_INFO) *infos = NULL;
   X509_INFO *info = NULL;
   
-  BIO *input = BIO_new_file(filename, "r");
-  if(input==NULL) {
-    printf("Could not read file %s\n", filename);
-    return -1;
-  }
-  infos = PEM_X509_INFO_read_bio(input, NULL, NULL, NULL);
-  
-  BIO_free(input);
+  BIO *bio = fopen_bio(filename);
+  infos = PEM_X509_INFO_read_bio(bio, NULL, NULL, NULL);
+  BIO_free_all(bio);
 
   for(i=0; i < sk_X509_INFO_num(infos); i++) {
     info = sk_X509_INFO_value(infos, i);
