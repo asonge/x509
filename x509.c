@@ -117,24 +117,23 @@ cleanup:
 
 int verify_cert(const char *ca_file, const char *chain_file, X509 *cert) {
   int ret;
-  X509_STORE *store;             // The trusted store
-  X509_LOOKUP *lookup;           // The lookup method for the trusted store
-  X509_STORE_CTX *ctx;           // The context for verifying a certificate
-  STACK_OF(X509) *chain = NULL;  // A stack of intermediate certificates to validate
+  X509_STORE *store;                          // The trusted store
+  X509_LOOKUP *lookup;                        // The lookup method for the trusted store
+  X509_STORE_CTX *ctx = X509_STORE_CTX_new(); // The context for verifying a certificate
+  STACK_OF(X509) *chain = NULL;               // A stack of intermediate certificates to validate
 
   store = X509_STORE_new();
   lookup = X509_STORE_add_lookup(store,X509_LOOKUP_file());
   ret = X509_LOOKUP_load_file(lookup, ca_file, X509_FILETYPE_PEM);
   if(ret!=1) {
     printf("Could not read file %s for reason: %d\n", ca_file, ret);
-    return 1;
+    goto cleanup;
   }
 
-  ctx = X509_STORE_CTX_new();
   ret = X509_STORE_CTX_init(ctx, store, cert, chain);
   if(ret!=1) {
     printf("Result of store ctx init: %d\n", ret);
-    return 1;
+    goto cleanup;
   }
   ret = X509_verify_cert(ctx);
   if(ret<1 || X509_STORE_CTX_get_error(ctx) != X509_V_OK) {
@@ -142,10 +141,10 @@ int verify_cert(const char *ca_file, const char *chain_file, X509 *cert) {
     print_error(ctx);
     
     int j;
-    STACK_OF(X509) *chain = X509_STORE_CTX_get1_chain(ctx);
+    STACK_OF(X509) *p_chain = X509_STORE_CTX_get1_chain(ctx);
     int num_untrusted = ctx->last_untrusted;
-    for (j = 0; j < sk_X509_num(chain); j++) {
-      X509 *cert = sk_X509_value(chain, j);
+    for (j = 0; j < sk_X509_num(p_chain); j++) {
+      X509 *cert = sk_X509_value(p_chain, j);
       printf("depth=%d: ", j);
       X509_NAME_print_ex_fp(stdout,
                             X509_get_subject_name(cert),
@@ -154,12 +153,13 @@ int verify_cert(const char *ca_file, const char *chain_file, X509 *cert) {
         printf(" (untrusted)");
       printf("\n");
     }
-    sk_X509_pop_free(chain, X509_free);
-
-    return !OK;
+    sk_X509_pop_free(p_chain, X509_free);
   }
-  
-  return OK;
+cleanup:
+  X509_STORE_free(store);
+  X509_STORE_CTX_free(ctx);
+  if(chain!=NULL) sk_X509_pop_free(chain, X509_free);
+  return ret==1 ? OK : !OK;
 }
 
 void print_help(const char *cmd) {
