@@ -5,7 +5,6 @@
 #include "openssl/pem.h"
 #include "openssl/x509.h"
 #include "openssl/x509_vfy.h"
-// #include "openssl/crypto.h"
 
 #define OK 1
 
