@@ -6,16 +6,23 @@
 #include "openssl/x509.h"
 #include "openssl/x509_vfy.h"
 
-#define OK 1
+const int OK = 1;
+const int BUF_SIZE = 4096;
 
-X509 * read_pem_file(const char *filename);
-int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs);
-void print_help(const char *cmd);
-void print_error(X509_STORE_CTX *ctx);
-int sign_file(const char *pk_file, const char *file);
+int sign(const char *pk_file, const char *file);
+
+int verify(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file);
 int verify_cert(const char *ca_file, const char *chain_file, X509 *cert);
 int verify_signature(X509 *cert, const char *sign_file, const char *file);
-int verify_cert_and_signature(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file);
+
+void print_help(const char *cmd);
+void print_error(X509_STORE_CTX *ctx);
+
+X509 * read_pem_file(const char *filename);
+BIO * bio_base64_file(const char *filename);
+int read_pem_file_multi(const char *filename, STACK_OF(X509) **certs);
+BIO * fopen_bio(const char *filename);
+EVP_MD_CTX *md_sign_or_verify_file(const char *filename, EVP_PKEY *pkey, const EVP_MD *md);
 
 int main(int argc, char *argv[]) {
   if(argc < 2) {
@@ -25,49 +32,18 @@ int main(int argc, char *argv[]) {
   // If the following line is missing, nothing works and you will not know why.
   OpenSSL_add_all_algorithms();
   if(strcmp(argv[1],"sign")==0 && argc==4) {
-    return sign_file(argv[2], argv[3])==OK ? 0 : 1;
+    return sign(argv[2], argv[3])==OK ? 0 : 1;
   } else if(strcmp(argv[1],"verify")==0 && argc==6) {
-    return verify_cert_and_signature(argv[2], argv[3], NULL, argv[4], argv[5])==OK ? 0 : 1;
+    return verify(argv[2], argv[3], NULL, argv[4], argv[5])==OK ? 0 : 1;
   } else if(strcmp(argv[1],"verify")==0 && argc==7) {
-    return verify_cert_and_signature(argv[2], argv[3], argv[4], argv[5], argv[6])==OK ? 0 : 1;
+    return verify(argv[2], argv[3], argv[4], argv[5], argv[6])==OK ? 0 : 1;
   } else {
     print_help(argv[0]);
     return 1;
   }
 }
 
-const int BUF_SIZE = 4096;
-
-BIO *fopen_bio(const char *filename) {
-  if(strcmp(filename,"-")==0) {
-    return BIO_new_fp(stdout, BIO_NOCLOSE);
-  } else {
-    return BIO_new_file(filename, "rb");
-  }
-}
-BIO *bio_base64_file(const char *filename) {
-  BIO *bio, *b64;
-  bio = fopen_bio(filename);
-  b64 = BIO_new(BIO_f_base64());
-  return BIO_push(b64, bio);
-}
-// EVP_VerifyInit and EVP_SignInit, EVP_VerifyUpdate and EVP_SignUpdate are all actually
-// EVP_DigestInit and EVP_DigestUpdate, so we can collect some repeated code here.
-EVP_MD_CTX *md_sign_or_verify_file(const char *filename, EVP_PKEY *pkey, const EVP_MD *md) {
-  BIO *bio = fopen_bio(filename);
-  int bytes_read = 0;
-  unsigned char buf[BUF_SIZE];
-
-  EVP_MD_CTX *ctx = EVP_MD_CTX_create();
-  EVP_DigestInit(ctx, md);
-  while((bytes_read=BIO_read(bio, buf, BUF_SIZE))>0) {
-    EVP_DigestUpdate(ctx, buf, bytes_read);
-  }
-  BIO_free_all(bio);
-  return ctx;
-}
-
-int sign_file(const char *pk_file, const char *sign_file) {
+int sign(const char *pk_file, const char *sign_file) {
   int ret;
   EVP_MD_CTX *ctx = NULL;
   
@@ -96,7 +72,7 @@ int sign_file(const char *pk_file, const char *sign_file) {
   return ret==1 ? OK : !OK;
 }
 
-int verify_cert_and_signature(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file) {
+int verify(const char *ca_file, const char *cert_file, const char *chain_file, const char *sign_file, const char *file) {
   // The certificate we want to validate
   X509 *cert = NULL;
   cert = read_pem_file(cert_file);
@@ -206,6 +182,36 @@ void print_error(X509_STORE_CTX *ctx) {
   X509_NAME_print_ex_fp(stdout, cert_name, 2, 0);
   printf("\n");
 }
+
+BIO * fopen_bio(const char *filename) {
+  if(strcmp(filename,"-")==0) {
+    return BIO_new_fp(stdout, BIO_NOCLOSE);
+  } else {
+    return BIO_new_file(filename, "rb");
+  }
+}
+BIO * bio_base64_file(const char *filename) {
+  BIO *bio, *b64;
+  bio = fopen_bio(filename);
+  b64 = BIO_new(BIO_f_base64());
+  return BIO_push(b64, bio);
+}
+// EVP_VerifyInit and EVP_SignInit, EVP_VerifyUpdate and EVP_SignUpdate are all actually
+// EVP_DigestInit and EVP_DigestUpdate, so we can collect some repeated code here.
+EVP_MD_CTX *md_sign_or_verify_file(const char *filename, EVP_PKEY *pkey, const EVP_MD *md) {
+  BIO *bio = fopen_bio(filename);
+  int bytes_read = 0;
+  unsigned char buf[BUF_SIZE];
+
+  EVP_MD_CTX *ctx = EVP_MD_CTX_create();
+  EVP_DigestInit(ctx, md);
+  while((bytes_read=BIO_read(bio, buf, BUF_SIZE))>0) {
+    EVP_DigestUpdate(ctx, buf, bytes_read);
+  }
+  BIO_free_all(bio);
+  return ctx;
+}
+
 
 X509 * read_pem_file(const char *filename) {
   BIO *bio = fopen_bio(filename);
